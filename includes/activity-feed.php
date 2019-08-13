@@ -2,11 +2,11 @@
 /**
  * In activity feeds, add links to the duplicates of a topic to its topic create activity's action string.
  *
- * If the activity being displayed is an original with duplicates, the function gets an Array of the 
+ * If the activity being displayed is an original with duplicates, the function gets an Array of the
  * duplicate topics. If it's a duplicate, if gets an Array of the other duplicates plus the original.
  * Then it reconstructs the activity string displayed to the user, adding links to the duplicate topics
  * and/or the original.
- * 
+ *
  * @param String $action The original action string, passed to the bp_get_activity_action filter.
  * @param BP_Activity_Activity $displayed_activity The activity being displayed in the feed.
  * @uses bpmfp_get_forum_id_for_activity()
@@ -64,7 +64,7 @@ function bpmfp_add_duplicate_topics_to_activity_action_string( $action, $display
 				$displayed_topic_permalink = bbp_get_topic_permalink( $displayed_activity->secondary_item_id );
 				$topic_title = bbp_get_topic_title( $displayed_activity->secondary_item_id );
 				$displayed_topic_link      = '<a href="' . $displayed_topic_permalink . '">' . $topic_title . '</a>';
-				
+
 				$displayed_forum_id = bpmfp_get_forum_id_for_activity( $displayed_activity );
 
 				/**
@@ -84,7 +84,7 @@ function bpmfp_add_duplicate_topics_to_activity_action_string( $action, $display
 
 				$displayed_forum_permalink = bbp_get_forum_permalink( $displayed_forum_id );
 				$displayed_forum_link = '<a href="' . esc_url( $displayed_forum_permalink ) . '">' . $displayed_forum_name . '</a>';
-				
+
 				$added_topic_links = array();
 				foreach( $activities_to_add as $activity_to_add ) {
 					$added_topic_permalink = bbp_get_topic_permalink( $activity_to_add->secondary_item_id );
@@ -117,7 +117,7 @@ add_filter( 'bp_get_activity_action', 'bpmfp_add_duplicate_topics_to_activity_ac
 
 /**
  * In activity feeds, only show the user the first activity associated with a topic that was cross-posted.
- * 
+ *
  * This way, users only see one entry, even if a topic was cross-posted to many groups that they're a part of.
  *
  * @param Array $activity The Array returned by bp_activity_get(), filtered by this function
@@ -134,6 +134,7 @@ function bpmfp_remove_duplicate_activities_from_activity_stream( $activity, $r )
 		$activity_ids = wp_list_pluck( $activity['activities'], 'id' );
 		$exclude = (array) $r['exclude'];
 		$exclude = array_merge( $exclude, $activity_ids );
+
 		// Get a list of the IDs of duplicate activities among the ones that have been queried
 		$activities_to_hide = bpmfp_get_duplicate_activities( $activity['activities'] );
 
@@ -154,6 +155,8 @@ function bpmfp_remove_duplicate_activities_from_activity_stream( $activity, $r )
 			$original_activity_count = count( $activity_ids );
 
 			while( $deduped_activity_count < $original_activity_count ) {
+				$force_break = false;
+
 				// Start with the same arguments as the original query
 				$backfill_args = $r;
 				// Exclude all the activity items we've already queried
@@ -169,19 +172,25 @@ function bpmfp_remove_duplicate_activities_from_activity_stream( $activity, $r )
 				// We're using BP_Activity_Activity::get because the function we're in is hooked to bp_activity_get().
 				// so calling it would cause unnecessary and probably infinite recursion
 				$backfill = BP_Activity_Activity::get( $backfill_args );
+				if ( ! empty( $backfill['activities'] ) ) {
+					// Add the newly queried IDs to the exclude list
+					$backfill_ids = wp_list_pluck( $backfill['activities'], 'id' );
+					$exclude = array_merge( $exclude, $backfill_ids );
+					// Update the total queried activities count
+					$activity['total'] += $backfill['total'];
+					// Merge our backfilled items into the queried activities list
+					$activity['activities'] = array_merge( $activity['activities'], $backfill['activities'] );
 
-				// Add the newly queried IDs to the exclude list
-				$backfill_ids = wp_list_pluck( $backfill['activities'], 'id' );
-				$exclude = array_merge( $exclude, $backfill_ids );
-				// Update the total queried activities count
-				$activity['total'] += $backfill['total'];
-				// Merge our backfilled items into the queried activities list
-				$activity['activities'] = array_merge( $activity['activities'], $backfill['activities'] );
+					// To-do: This could probably be DRY-ed out using a do-while loop, but I think it works well for now
+					// Repeat the deduplication routine as above, with our newly merged array of activities
+					$merged_activity_ids = wp_list_pluck( $activity['activities'], 'id' );
+					$merged_activities_to_hide = bpmfp_get_duplicate_activities( $activity['activities'] );
+				} else {
+					$merged_activities_to_hide = wp_list_pluck( $activity['activities'], 'id' );
+					$deduped_activity_count = $original_activity_count;
+					$force_break = true;
+				}
 
-				// To-do: This could probably be DRY-ed out using a do-while loop, but I think it works well for now
-				// Repeat the deduplication routine as above, with our newly merged array of activities
-				$merged_activity_ids = wp_list_pluck( $activity['activities'], 'id' );
-				$merged_activities_to_hide = bpmfp_get_duplicate_activities( $activity['activities'] );
 				// We need to re-set the removed activities count here because we're going to re-use in the query
 				// above if the loop comes around again
 				$removed = 0;
@@ -193,11 +202,16 @@ function bpmfp_remove_duplicate_activities_from_activity_stream( $activity, $r )
 						}
 					}
 				}
+
 				// If we have more than originally queried after all the deduplication, cut it down
-				if( count( $activity['activities'] > $original_activity_count ) ) {
+				if( is_array( $activity['activities'] ) && ( count( $activity['activities'] ) > $original_activity_count ) ) {
 					$activity['activities'] = array_slice( $activity['activities'], 0, $original_activity_count );
 				}
 				// Update our current activity count, for use in the while-loop condition check at the top
+				if ( $force_break ) {
+					break;
+				}
+
 				$deduped_activity_count = count( $activity['activities'] );
 			}
 		}
@@ -245,16 +259,21 @@ function bpmfp_get_duplicate_activities( $activities ) {
 			}
 			// If there are other duplicates of the same activity, hide them (regardless of if the original is in the queried activities or not)
 			$query_duplicates_of_original = BP_Activity_Activity::get( array(
-				'meta_query' => array( array(
-					'key' => '_duplicate_of',
-					'value' => $duplicate_of ) ) 
+				'fields'     => 'ids',
+				'meta_query' => array(
+					array(
+						'key'   => '_duplicate_of',
+						'value' => $duplicate_of,
+					),
+				)
 			) );
+
 			if ( ! empty( $query_duplicates_of_original['activities'] ) && is_array( $query_duplicates_of_original['activities'] ) ) {
 				$duplicates_of_original = $query_duplicates_of_original['activities'];
-				foreach( $duplicates_of_original as $duplicate_activity ) {
+				foreach( $duplicates_of_original as $duplicate_activity_id ) {
 					// If the duplicate activity is not the same as the activity we started with, and it's in the queried activities, hide it
-					if ( $duplicate_activity->id != $activity_item->id && in_array( $duplicate_activity->id, $activity_ids ) ) {
-						$duplicate_activities[] = $duplicate_activity->id;
+					if ( $duplicate_activity_id != $activity_item->id && in_array( $duplicate_activity_id, $activity_ids ) ) {
+						$duplicate_activities[] = $duplicate_activity_id;
 					}
 				}
 			}
